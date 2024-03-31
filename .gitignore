@@ -1,1 +1,5 @@
+# Ignore secret store 
+/cert
+
+# Auto gernated by 
 /target
