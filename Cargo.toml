@@ -12,3 +12,4 @@ tokio = { version = "1.37.0", features = ["full"] }
 strum = "0.26"
 strum_macros = "0.26"
 include_dir = "0.7.3"
+tokio-task-pool = "0.1.5"

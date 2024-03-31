@@ -235,6 +235,7 @@ dependencies = [
  "strum_macros",
  "thiserror",
  "tokio",
+ "tokio-task-pool",
 ]
 
 [[package]]
@@ -358,6 +359,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-task-pool"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b979d664a052ebb638f0eb4d1134bed9552a5975b82c0c61bf55ff27ff8953"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

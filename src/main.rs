@@ -1,11 +1,13 @@
-use std::{borrow::Borrow, collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use tokio::{self, io::AsyncWriteExt, net::TcpListener, sync::Mutex};
+use tokio::{self, io::AsyncWriteExt, net::TcpListener};
+use tokio_task_pool::Pool;
 
 mod http;
 #[tokio::main]
 async fn main() -> Result<()> {
+    let pool = Pool::unbounded().with_run_timeout(Duration::from_secs(10));
     let listener = TcpListener::bind("localhost:8080").await?;
     println!("Bind on localhost:8080");
     let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
@@ -15,7 +17,7 @@ async fn main() -> Result<()> {
 
     while let Ok((mut socket, _)) = listener.accept().await {
         let ctx = http_context.clone();
-        tokio::spawn(async move {
+        pool.spawn(async move {
             let (mut rd, mut wr) = socket.split();
             let mut handler = ctx.get(&mut rd, &mut wr);
             use http::HttpHandleStatus::*;
@@ -41,7 +43,8 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        });
+        })
+        .await?;
     }
     Ok(())
 }
