@@ -1,19 +1,22 @@
 use std::{
     collections::HashMap,
-    path::{self, Path},
+    path::{Path, PathBuf},
     pin::Pin,
     str::FromStr,
     sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use include_dir::{include_dir, Dir};
 use strum::IntoEnumIterator;
 use strum_macros::{Display, EnumIter, EnumString, FromRepr};
 use thiserror::Error;
 use tokio::{
     fs::{self, File},
-    io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{
+        self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+        BufWriter,
+    },
 };
 
 #[derive(Clone, Copy, EnumIter, Debug, PartialEq, FromRepr, Hash, Eq, Display)]
@@ -40,7 +43,7 @@ pub enum Status {
     InternalServerError = 500,
 }
 
-#[derive(Clone, Copy, EnumIter, Debug, PartialEq, EnumString)]
+#[derive(Clone, Copy, EnumIter, Debug, PartialEq, EnumString, Display)]
 pub enum Method {
     GET,
     POST,
@@ -50,8 +53,10 @@ pub enum Method {
 enum InternalError {
     #[error("format error")]
     FormatError,
-    #[error("method not allowed")]
-    MethodNotAllowed,
+    #[error("required header field is not provided")]
+    RequiredHeaderField,
+    #[error("eof reached without expectation")]
+    EOFReached,
     #[error("unknown error")]
     Unknown,
 }
@@ -99,6 +104,7 @@ struct RequestHeader {
     uri: String,
     user_agent: Option<String>,
     host: Option<String>,
+    content_length: Option<usize>,
 }
 
 struct ResponseHeader {
@@ -117,89 +123,138 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
     pub async fn handle(mut self) -> Result<()> {
         let req_header = self.request_header().await;
         match req_header {
-            Err(e) => {
-                let err_msg = e.to_string();
-                let content = self
-                    .context
-                    .cache_status_page
-                    .get(&Status::InternalServerError)
-                    .unwrap()
-                    .clone();
-                self.response_header(ResponseHeader {
-                    status: Status::InternalServerError,
-                    content_length: Some(content.len() + err_msg.len()),
-                    content_type: "text/plain".to_string(),
-                })
-                .await?;
-                self.conn_wr.write_all(&content).await?;
-                self.conn_wr.write_all(err_msg.as_bytes()).await?;
-            }
-            Ok(req) => {
-                let path = self.context.serve_dir.join(req.uri);
-                if path.starts_with(self.context.serve_dir.as_ref()) {
-                    if let Ok(mut file) = fs::File::open(path).await {
-                        if file.metadata().await.map(|metadata| metadata.is_file())? {
-                            self.response_header(ResponseHeader {
-                                status: Status::Ok,
-                                content_length: file
-                                    .metadata()
-                                    .await
-                                    .map(|metadata| metadata.len() as usize)
-                                    .ok(),
-                                content_type: "text/html".to_string(),
-                            })
-                            .await?;
-                            self.body(&mut file).await?;
-                            return Ok(());
-                        }
-                    }
+            Err(e) => match e.downcast_ref() {
+                Some(InternalError::EOFReached) => return Ok(()),
+                _ => {
+                    let content = self
+                        .context
+                        .cache_status_page
+                        .get(&Status::InternalServerError)
+                        .unwrap()
+                        .clone();
+                    self.response_header(ResponseHeader {
+                        status: Status::InternalServerError,
+                        content_length: Some(content.len()),
+                        content_type: "text/plain".to_string(),
+                    })
+                    .await?;
+                    self.conn_wr.write_all(&content).await?;
+                    return Err(e);
                 }
-                let content = self
-                    .context
-                    .cache_status_page
-                    .get(&Status::NotFound)
-                    .unwrap()
-                    .clone();
-                self.response_header(ResponseHeader {
-                    status: Status::Ok,
-                    content_length: Some(content.len()),
-                    content_type: "text/html".to_string(),
-                })
-                .await?;
-                self.conn_wr.write_all(&content).await?;
+            },
+            Ok(req) => {
+                if req.uri == "/echo" && req.method == Method::POST {
+                    self.response_header(ResponseHeader {
+                        status: Status::Ok,
+                        content_length: None,
+                        content_type: "text/plain".to_string(),
+                    })
+                    .await?;
+                    self.echo_body(&req).await?;
+                } else if req.method == Method::GET {
+                    let path = self.context.serve_dir.join(Path::new(&req.uri[1..]));
+                    let file: Option<File> = {
+                        if path.starts_with(self.context.serve_dir.as_ref()) {
+                            if let Ok(file) = fs::File::open(path).await {
+                                if file.metadata().await.map(|metadata| metadata.is_file())? {
+                                    Some(file)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(mut file) = file {
+                        self.response_header(ResponseHeader {
+                            status: Status::Ok,
+                            content_length: file
+                                .metadata()
+                                .await
+                                .map(|metadata| metadata.len() as usize)
+                                .ok(),
+                            content_type: "text/html".to_string(),
+                        })
+                        .await?;
+                        self.file_body(&mut file).await.map(|_| ())?
+                    } else {
+                        let content = self
+                            .context
+                            .cache_status_page
+                            .get(&Status::NotFound)
+                            .unwrap()
+                            .clone();
+                        self.response_header(ResponseHeader {
+                            status: Status::NotFound,
+                            content_length: Some(content.len()),
+                            content_type: "text/html".to_string(),
+                        })
+                        .await?;
+                        self.conn_wr.write_all(&content).await?;
+                    }
+                } else {
+                    let content = self
+                        .context
+                        .cache_status_page
+                        .get(&Status::MethodNotAllowed)
+                        .unwrap()
+                        .clone();
+                    self.response_header(ResponseHeader {
+                        status: Status::MethodNotAllowed,
+                        content_length: Some(content.len()),
+                        content_type: "text/html".to_string(),
+                    })
+                    .await?;
+                    self.conn_wr.write_all(&content).await?;
+                }
             }
         }
         self.conn_wr.flush().await?;
         Ok(())
     }
     async fn request_header(&mut self) -> Result<RequestHeader> {
-        let mut line = String::new();
-        self.conn_rd.read_line(&mut line).await?;
+        let mut line = String::with_capacity(128);
+        self.conn_rd.read_line(&mut line).await.map(|n| {
+            if n <= 0 {
+                Err(Error::new(InternalError::EOFReached))
+            } else {
+                Ok(n)
+            }
+        })??;
 
-        let (method, uri) = {
-            let mut iter = line.split_ascii_whitespace();
-            let method = Method::from_str(iter.next().ok_or(InternalError::MethodNotAllowed)?)
-                .map_err(|e| InternalError::MethodNotAllowed)?;
-            let uri = iter.next().ok_or(InternalError::FormatError)?.to_string();
-            (method, uri)
-        };
+        let mut iter = line.split_ascii_whitespace();
+        let method = Method::from_str(iter.next().ok_or(InternalError::FormatError)?)
+            .map_err(|_| InternalError::FormatError)?;
+        let uri = iter.next().ok_or(InternalError::FormatError)?.to_string();
         line.clear();
 
         let mut host: Option<String> = None;
         let mut user_agent: Option<String> = None;
+        let mut conetnt_length: Option<usize> = None;
         // FIXME: check http version
         loop {
             self.conn_rd.read_line(&mut line).await?;
             if line == "\r\n" {
                 break;
             }
-            let mut iter = line.split(": ");
-            match iter.next().ok_or(InternalError::FormatError)? {
+            let mut iter = line.split(": ").map(|sec| sec.replace("\r\n", ""));
+            match iter.next().ok_or(InternalError::FormatError)?.as_str() {
                 "Host" => {
                     host = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
                 }
                 "User-Agent" => {
                     user_agent = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
+                }
+                "Content-Length" => {
+                    conetnt_length = Some(
+                        iter.next()
+                            .map(|sz| sz.parse::<usize>().ok())
+                            .flatten()
+                            .ok_or(InternalError::FormatError)?,
+                    )
                 }
                 _ => {}
             }
@@ -211,6 +266,7 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
             uri: uri,
             host: host,
             user_agent: user_agent,
+            content_length: conetnt_length,
         })
     }
     async fn response_header(&mut self, resp: ResponseHeader) -> Result<()> {
@@ -219,6 +275,7 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
             .await?;
         self.conn_wr.write(b"Server: Insomnia Server\r\n").await?;
         if let Some(sz) = resp.content_length {
+            // if content length is set
             self.conn_wr
                 .write(format!("Content-Length: {}\r\n", sz).as_bytes())
                 .await?;
@@ -227,10 +284,21 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
             .write(format!("Content-Type: {}\r\n", resp.content_type).as_bytes())
             .await?;
         self.conn_wr.write("\r\n".as_bytes()).await?;
+        self.conn_wr.flush().await?;
         Ok(())
     }
-    async fn body(&mut self, file: &mut File) -> Result<()> {
-        io::copy(file, &mut self.conn_wr).await?;
-        Ok(())
+    async fn file_body(&mut self, file: &mut File) -> Result<u64> {
+        io::copy(file, &mut self.conn_wr)
+            .await
+            .map_err(|e| Error::new(e))
+    }
+    async fn echo_body(&mut self, req: &RequestHeader) -> Result<u64> {
+        let mut trunc = self.conn_rd.as_mut().take(
+            req.content_length
+                .ok_or(InternalError::RequiredHeaderField)? as u64,
+        );
+        io::copy(&mut trunc, &mut self.conn_wr)
+            .await
+            .map_err(|e| Error::new(e))
     }
 }

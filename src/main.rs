@@ -1,7 +1,7 @@
-use std::{collections::HashMap, future::IntoFuture, path::Path, rc::Rc, sync::Arc};
+use std::{borrow::Borrow, collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::Result;
-use tokio::{self, io::AsyncWriteExt, net::TcpListener};
+use tokio::{self, io::AsyncWriteExt, net::TcpListener, sync::Mutex};
 
 mod http;
 #[tokio::main]
@@ -10,12 +10,11 @@ async fn main() -> Result<()> {
     println!("Bind on localhost:8080");
     let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
         status_page: HashMap::<http::Status, Box<Path>>::default(),
-        serve_directory: Box::from(Path::new("static/")),
+        serve_directory: Box::from(Path::new("./static/")),
     }));
 
-    loop {
+    while let Ok((mut socket, _)) = listener.accept().await {
         let ctx = http_context.clone();
-        let (mut socket, _) = listener.accept().await?;
         tokio::spawn(async move {
             let (mut rd, mut wr) = socket.split();
             let handler = ctx.get(&mut rd, &mut wr);
@@ -36,4 +35,5 @@ async fn main() -> Result<()> {
             }
         });
     }
+    Ok(())
 }
