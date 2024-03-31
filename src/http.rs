@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::Path, pin::Pin, str::FromStr, sync::Arc};
 
 use anyhow::{Error, Result};
 use include_dir::{include_dir, Dir};
@@ -99,12 +93,21 @@ impl HttpContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, EnumString)]
+pub enum ConnectionType {
+    #[strum(serialize = "keep-alive")]
+    KeepAlive,
+    #[strum(serialize = "close")]
+    Close,
+}
+
 struct RequestHeader {
     method: Method,
     uri: String,
     user_agent: Option<String>,
     host: Option<String>,
     content_length: Option<usize>,
+    connection: ConnectionType,
 }
 
 struct ResponseHeader {
@@ -119,12 +122,19 @@ pub struct HttpHandler<R: AsyncRead, W: AsyncWrite> {
     conn_wr: Pin<Box<BufWriter<W>>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HttpHandleStatus {
+    Continue,
+    EOF,
+}
+
 impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
-    pub async fn handle(mut self) -> Result<()> {
+    pub async fn handle(&mut self) -> Result<HttpHandleStatus> {
+        use HttpHandleStatus::*;
         let req_header = self.request_header().await;
         match req_header {
             Err(e) => match e.downcast_ref() {
-                Some(InternalError::EOFReached) => return Ok(()),
+                Some(InternalError::EOFReached) => Ok(EOF),
                 _ => {
                     let content = self
                         .context
@@ -139,7 +149,7 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
                     })
                     .await?;
                     self.conn_wr.write_all(&content).await?;
-                    return Err(e);
+                    Err(e)
                 }
             },
             Ok(req) => {
@@ -210,10 +220,14 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
                     .await?;
                     self.conn_wr.write_all(&content).await?;
                 }
+                self.conn_wr.flush().await?;
+                if req.connection == ConnectionType::Close {
+                    Ok(EOF)
+                } else {
+                    Ok(Continue)
+                }
             }
         }
-        self.conn_wr.flush().await?;
-        Ok(())
     }
     async fn request_header(&mut self) -> Result<RequestHeader> {
         let mut line = String::with_capacity(128);
@@ -234,6 +248,7 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
         let mut host: Option<String> = None;
         let mut user_agent: Option<String> = None;
         let mut conetnt_length: Option<usize> = None;
+        let mut connection = ConnectionType::KeepAlive;
         // FIXME: check http version
         loop {
             self.conn_rd.read_line(&mut line).await?;
@@ -256,6 +271,11 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
                             .ok_or(InternalError::FormatError)?,
                     )
                 }
+                "Connection" => {
+                    connection = ConnectionType::from_str(
+                        iter.next().ok_or(InternalError::FormatError)?.as_str(),
+                    )?
+                }
                 _ => {}
             }
             line.clear()
@@ -267,6 +287,7 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
             host: host,
             user_agent: user_agent,
             content_length: conetnt_length,
+            connection: connection,
         })
     }
     async fn response_header(&mut self, resp: ResponseHeader) -> Result<()> {

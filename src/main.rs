@@ -17,21 +17,29 @@ async fn main() -> Result<()> {
         let ctx = http_context.clone();
         tokio::spawn(async move {
             let (mut rd, mut wr) = socket.split();
-            let handler = ctx.get(&mut rd, &mut wr);
-            let result = handler.handle().await;
-            if let Err(e) = result {
-                //eprintln!("serving request encounter error: {}\n{}", e, e.backtrace());
-                let _ = tokio::io::stderr()
-                    .write(
-                        format!(
-                            "serving request encounter error: {}\n{}\n",
-                            e,
-                            e.backtrace()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .map_err(|e2| eprintln!("Log error failed {}", e2));
+            let mut handler = ctx.get(&mut rd, &mut wr);
+            use http::HttpHandleStatus::*;
+            loop {
+                match handler.handle().await {
+                    Err(e) => {
+                        let _ = tokio::io::stderr()
+                            .write(
+                                format!(
+                                    "serving request encounter error: {}\n{}\n",
+                                    e,
+                                    e.backtrace()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .map_err(|e2| eprintln!("Log error failed {}", e2));
+                    }
+                    Ok(status) => {
+                        if status == EOF {
+                            break;
+                        }
+                    }
+                }
             }
         });
     }
