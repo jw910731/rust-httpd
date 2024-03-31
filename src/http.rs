@@ -1,4 +1,10 @@
-use std::{collections::HashMap, panic, path::Path, pin::Pin, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{self, Path},
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+};
 
 use anyhow::Result;
 use include_dir::{include_dir, Dir};
@@ -7,10 +13,7 @@ use strum_macros::{Display, EnumIter, EnumString, FromRepr};
 use thiserror::Error;
 use tokio::{
     fs::{self, File},
-    io::{
-        self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
-        BufWriter,
-    },
+    io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
 };
 
 #[derive(Clone, Copy, EnumIter, Debug, PartialEq, FromRepr, Hash, Eq, Display)]
@@ -55,10 +58,12 @@ enum InternalError {
 
 pub struct HttpHandleOption {
     pub status_page: HashMap<Status, Box<Path>>,
+    pub serve_directory: Box<Path>,
 }
 
 pub struct HttpContext {
     cache_status_page: HashMap<Status, Arc<[u8]>>,
+    serve_dir: Box<Path>,
 }
 
 static STATUS_PAGE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/status_pages");
@@ -77,9 +82,10 @@ impl HttpContext {
         }
         HttpContext {
             cache_status_page: cache,
+            serve_dir: options.serve_directory,
         }
     }
-    pub fn get<R: AsyncRead, W: AsyncWrite>(&self, rd: R, wr: W) -> HttpHandler<R, W> {
+    pub fn get<R: AsyncRead, W: AsyncWrite>(self: Arc<Self>, rd: R, wr: W) -> HttpHandler<R, W> {
         HttpHandler {
             context: self,
             conn_rd: Box::pin(BufReader::new(rd)),
@@ -101,60 +107,66 @@ struct ResponseHeader {
     content_type: String,
 }
 
-pub struct HttpHandler<'a, R: AsyncRead, W: AsyncWrite> {
-    context: &'a HttpContext,
+pub struct HttpHandler<R: AsyncRead, W: AsyncWrite> {
+    context: Arc<HttpContext>,
     conn_rd: Pin<Box<BufReader<R>>>,
     conn_wr: Pin<Box<BufWriter<W>>>,
 }
 
-impl<'a, R: AsyncRead, W: AsyncWrite> HttpHandler<'a, R, W> {
+impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
     pub async fn handle(mut self) -> Result<()> {
         let req_header = self.request_header().await;
         match req_header {
             Err(e) => {
-                eprintln!("serving request encounter error: {}\n{}", e, e.backtrace());
+                let err_msg = e.to_string();
                 let content = self
                     .context
                     .cache_status_page
                     .get(&Status::InternalServerError)
-                    .unwrap();
+                    .unwrap()
+                    .clone();
                 self.response_header(ResponseHeader {
                     status: Status::InternalServerError,
-                    content_length: Some(content.len()),
+                    content_length: Some(content.len() + err_msg.len()),
                     content_type: "text/plain".to_string(),
                 })
                 .await?;
                 self.conn_wr.write_all(&content).await?;
+                self.conn_wr.write_all(err_msg.as_bytes()).await?;
             }
             Ok(req) => {
-                if let Ok(mut file) = fs::File::open(format!("static/{}", req.uri)).await {
-                    if file.metadata().await.map(|metadata| metadata.is_file())? {
-                        self.response_header(ResponseHeader {
-                            status: Status::Ok,
-                            content_length: file
-                                .metadata()
-                                .await
-                                .map(|metadata| metadata.len() as usize)
-                                .ok(),
-                            content_type: "text/html".to_string(),
-                        })
-                        .await?;
-                        self.body(&mut file).await?;
-                        return Ok(());
+                let path = self.context.serve_dir.join(req.uri);
+                if path.starts_with(self.context.serve_dir.as_ref()) {
+                    if let Ok(mut file) = fs::File::open(path).await {
+                        if file.metadata().await.map(|metadata| metadata.is_file())? {
+                            self.response_header(ResponseHeader {
+                                status: Status::Ok,
+                                content_length: file
+                                    .metadata()
+                                    .await
+                                    .map(|metadata| metadata.len() as usize)
+                                    .ok(),
+                                content_type: "text/html".to_string(),
+                            })
+                            .await?;
+                            self.body(&mut file).await?;
+                            return Ok(());
+                        }
                     }
                 }
                 let content = self
                     .context
                     .cache_status_page
                     .get(&Status::NotFound)
-                    .unwrap();
+                    .unwrap()
+                    .clone();
                 self.response_header(ResponseHeader {
                     status: Status::Ok,
                     content_length: Some(content.len()),
                     content_type: "text/html".to_string(),
                 })
                 .await?;
-                self.conn_wr.write_all(content).await?;
+                self.conn_wr.write_all(&content).await?;
             }
         }
         self.conn_wr.flush().await?;
@@ -205,9 +217,7 @@ impl<'a, R: AsyncRead, W: AsyncWrite> HttpHandler<'a, R, W> {
         self.conn_wr
             .write(format!("HTTP/1.1 {} {}\r\n", resp.status as i32, resp.status).as_bytes())
             .await?;
-        self.conn_wr
-            .write("Server: Insomnia beta1\r\n".as_bytes())
-            .await?;
+        self.conn_wr.write(b"Server: Insomnia Server\r\n").await?;
         if let Some(sz) = resp.content_length {
             self.conn_wr
                 .write(format!("Content-Length: {}\r\n", sz).as_bytes())
