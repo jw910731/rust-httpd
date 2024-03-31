@@ -1,4 +1,4 @@
-use std::{collections::HashMap, os, path::Path, pin::Pin, str::FromStr, sync::Arc};
+use std::{collections::HashMap, panic, path::Path, pin::Pin, str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use include_dir::{include_dir, Dir};
@@ -7,7 +7,10 @@ use strum_macros::{Display, EnumIter, EnumString, FromRepr};
 use thiserror::Error;
 use tokio::{
     fs::{self, File},
-    io::{self, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{
+        self, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+        BufWriter,
+    },
 };
 
 #[derive(Clone, Copy, EnumIter, Debug, PartialEq, FromRepr, Hash, Eq, Display)]
@@ -109,7 +112,7 @@ impl<'a, R: AsyncRead, W: AsyncWrite> HttpHandler<'a, R, W> {
         let req_header = self.request_header().await;
         match req_header {
             Err(e) => {
-                eprintln!("serving request encounter error: {}", e);
+                eprintln!("serving request encounter error: {}\n{}", e, e.backtrace());
                 let content = self
                     .context
                     .cache_status_page
