@@ -1,3 +1,9 @@
+# vscode config
+/.vscode
+
+# wrk test file
+/*.lua
+
 # Ignore secret store 
 /cert
 
