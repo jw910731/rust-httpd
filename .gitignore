@@ -4,8 +4,9 @@
 # wrk test file
 /*.lua
 
-# Ignore secret store 
+# Ignore local files
 /cert
+/static
 
 # Auto gernated by 
 /target
