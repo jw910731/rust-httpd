@@ -7,7 +7,7 @@ use tokio_task_pool::Pool;
 mod http;
 #[tokio::main]
 async fn main() -> Result<()> {
-    let pool = Pool::unbounded().with_run_timeout(Duration::from_secs(10));
+    let pool = Pool::bounded(8).with_run_timeout(Duration::from_secs(10));
     let listener = TcpListener::bind("localhost:8080").await?;
     println!("Bind on localhost:8080");
     let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
