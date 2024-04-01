@@ -130,28 +130,40 @@ pub enum HttpHandleStatus {
 
 impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
     pub async fn handle(&mut self) -> Result<HttpHandleStatus> {
+        let result = self.internal_handle().await;
+        match result {
+            Ok(_) => result,
+            Err(e) => {
+                if let (Some(InternalError::EOFReached), Some(std::io::ErrorKind::BrokenPipe)) =
+                    (e.downcast_ref(), e.downcast_ref())
+                {
+                    Ok(HttpHandleStatus::EOF)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+    pub async fn internal_handle(&mut self) -> Result<HttpHandleStatus> {
         use HttpHandleStatus::*;
         let req_header = self.request_header().await;
         match req_header {
-            Err(e) => match e.downcast_ref() {
-                Some(InternalError::EOFReached) => Ok(EOF),
-                _ => {
-                    let content = self
-                        .context
-                        .cache_status_page
-                        .get(&Status::InternalServerError)
-                        .unwrap()
-                        .clone();
-                    self.response_header(ResponseHeader {
-                        status: Status::InternalServerError,
-                        content_length: Some(content.len()),
-                        content_type: "text/plain".to_string(),
-                    })
-                    .await?;
-                    self.conn_wr.write_all(&content).await?;
-                    Err(e)
-                }
-            },
+            Err(e) => {
+                let content = self
+                    .context
+                    .cache_status_page
+                    .get(&Status::InternalServerError)
+                    .unwrap()
+                    .clone();
+                self.response_header(ResponseHeader {
+                    status: Status::InternalServerError,
+                    content_length: Some(content.len()),
+                    content_type: "text/plain".to_string(),
+                })
+                .await?;
+                self.conn_wr.write_all(&content).await?;
+                Err(e)
+            }
             Ok(req) => {
                 if req.uri == "/echo" && req.method == Method::POST {
                     self.response_header(ResponseHeader {
