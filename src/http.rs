@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, pin::Pin, str::FromStr, sync::Arc};
+use std::{collections::HashMap, io::ErrorKind, path::Path, pin::Pin, str::FromStr, sync::Arc};
 
 use anyhow::{Error, Result};
 use include_dir::{include_dir, Dir};
@@ -43,7 +43,7 @@ pub enum Method {
     POST,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 enum InternalError {
     #[error("format error")]
     FormatError,
@@ -128,27 +128,45 @@ pub enum HttpHandleStatus {
     EOF,
 }
 
+fn eof_err_helper<T>(e: std::io::Error) -> Result<T> {
+    match e.kind() {
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => {
+            Err(Error::new(InternalError::EOFReached))
+        }
+        _ => Err(Error::new(e)),
+    }
+}
+
 impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
     pub async fn handle(&mut self) -> Result<HttpHandleStatus> {
-        let result = self.internal_handle().await;
-        match result {
-            Ok(_) => result,
-            Err(e) => {
-                if let (Some(InternalError::EOFReached), Some(std::io::ErrorKind::BrokenPipe)) =
-                    (e.downcast_ref(), e.downcast_ref())
-                {
-                    Ok(HttpHandleStatus::EOF)
-                } else {
-                    Err(e)
-                }
+        self.internal_handle().await.or_else(|e| {
+            if e.downcast_ref::<std::io::Error>()
+                .map(|e| match e.kind() {
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => true,
+                    _ => false,
+                })
+                .unwrap_or(false)
+                || e.downcast_ref::<InternalError>()
+                    .map(|e| *e == InternalError::EOFReached)
+                    .unwrap_or(false)
+            {
+                Ok(HttpHandleStatus::EOF)
+            } else {
+                Err(e)
             }
-        }
+        })
     }
     pub async fn internal_handle(&mut self) -> Result<HttpHandleStatus> {
         use HttpHandleStatus::*;
         let req_header = self.request_header().await;
         match req_header {
             Err(e) => {
+                if e.downcast_ref::<InternalError>()
+                    .map(|e| *e == InternalError::EOFReached)
+                    .unwrap_or(false)
+                {
+                    return Err(e);
+                }
                 let content = self
                     .context
                     .cache_status_page
@@ -243,13 +261,17 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
     }
     async fn request_header(&mut self) -> Result<RequestHeader> {
         let mut line = String::with_capacity(128);
-        self.conn_rd.read_line(&mut line).await.map(|n| {
-            if n <= 0 {
-                Err(Error::new(InternalError::EOFReached))
-            } else {
-                Ok(n)
-            }
-        })??;
+        self.conn_rd
+            .read_line(&mut line)
+            .await
+            .or_else(eof_err_helper)
+            .and_then(|n| {
+                if n <= 0 {
+                    Err(Error::new(InternalError::EOFReached))
+                } else {
+                    Ok(n)
+                }
+            })?;
 
         let mut iter = line.split_ascii_whitespace();
         let method = Method::from_str(iter.next().ok_or(InternalError::FormatError)?)
@@ -263,7 +285,10 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
         let mut connection = ConnectionType::KeepAlive;
         // FIXME: check http version
         loop {
-            self.conn_rd.read_line(&mut line).await?;
+            self.conn_rd
+                .read_line(&mut line)
+                .await
+                .or_else(eof_err_helper)?;
             if line == "\r\n" {
                 break;
             }
