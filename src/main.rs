@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::Result;
 use tokio::{self, io::AsyncWriteExt, net::TcpListener};
@@ -7,7 +7,7 @@ use tokio_task_pool::Pool;
 mod http;
 #[tokio::main]
 async fn main() -> Result<()> {
-    let pool = Pool::bounded(8).with_run_timeout(Duration::from_secs(10));
+    let pool = Pool::bounded(8);
     let listener = TcpListener::bind("localhost:8080").await?;
     println!("Bind on localhost:8080");
     let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
