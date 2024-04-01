@@ -110,6 +110,58 @@ struct RequestHeader {
     connection: ConnectionType,
 }
 
+impl RequestHeader {
+    fn parse(raw: &str) -> Result<Self> {
+        let mut line_iter = raw.split("\r\n");
+        let mut iter = line_iter
+            .next()
+            .ok_or(InternalError::FormatError)?
+            .split_ascii_whitespace();
+        let method = Method::from_str(iter.next().ok_or(InternalError::FormatError)?)
+            .map_err(|_| InternalError::FormatError)?;
+        let uri = iter.next().ok_or(InternalError::FormatError)?.to_string();
+
+        let mut host: Option<String> = None;
+        let mut user_agent: Option<String> = None;
+        let mut conetnt_length: Option<usize> = None;
+        let mut connection = ConnectionType::KeepAlive;
+        // FIXME: check http version
+        for line in line_iter {
+            let mut iter = line.split(": ").map(|sec| sec.replace("\r\n", ""));
+            match iter.next().ok_or(InternalError::FormatError)?.as_str() {
+                "Host" => {
+                    host = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
+                }
+                "User-Agent" => {
+                    user_agent = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
+                }
+                "Content-Length" => {
+                    conetnt_length = Some(
+                        iter.next()
+                            .map(|sz| sz.parse::<usize>().ok())
+                            .flatten()
+                            .ok_or(InternalError::FormatError)?,
+                    )
+                }
+                "Connection" => {
+                    connection = ConnectionType::from_str(
+                        iter.next().ok_or(InternalError::FormatError)?.as_str(),
+                    )?
+                }
+                _ => {}
+            }
+        }
+        Ok(RequestHeader {
+            method: method,
+            uri: uri,
+            host: host,
+            user_agent: user_agent,
+            content_length: conetnt_length,
+            connection: connection,
+        })
+    }
+}
+
 struct ResponseHeader {
     status: Status,
     content_length: Option<usize>,
@@ -260,72 +312,24 @@ impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
         }
     }
     async fn request_header(&mut self) -> Result<RequestHeader> {
-        let mut line = String::with_capacity(128);
-        self.conn_rd
-            .read_line(&mut line)
-            .await
-            .or_else(eof_err_helper)
-            .and_then(|n| {
-                if n <= 0 {
-                    Err(Error::new(InternalError::EOFReached))
-                } else {
-                    Ok(n)
-                }
-            })?;
-
-        let mut iter = line.split_ascii_whitespace();
-        let method = Method::from_str(iter.next().ok_or(InternalError::FormatError)?)
-            .map_err(|_| InternalError::FormatError)?;
-        let uri = iter.next().ok_or(InternalError::FormatError)?.to_string();
-        line.clear();
-
-        let mut host: Option<String> = None;
-        let mut user_agent: Option<String> = None;
-        let mut conetnt_length: Option<usize> = None;
-        let mut connection = ConnectionType::KeepAlive;
-        // FIXME: check http version
+        let mut buf = String::with_capacity(1024);
         loop {
             self.conn_rd
-                .read_line(&mut line)
+                .read_line(&mut buf)
                 .await
-                .or_else(eof_err_helper)?;
-            if line == "\r\n" {
+                .or_else(eof_err_helper)
+                .and_then(|n| {
+                    if n > 0 {
+                        Ok(n)
+                    } else {
+                        Err(Error::new(InternalError::EOFReached))
+                    }
+                })?;
+            if buf.ends_with("\r\n\r\n") {
                 break;
             }
-            let mut iter = line.split(": ").map(|sec| sec.replace("\r\n", ""));
-            match iter.next().ok_or(InternalError::FormatError)?.as_str() {
-                "Host" => {
-                    host = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
-                }
-                "User-Agent" => {
-                    user_agent = Some(iter.next().ok_or(InternalError::FormatError)?.to_string());
-                }
-                "Content-Length" => {
-                    conetnt_length = Some(
-                        iter.next()
-                            .map(|sz| sz.parse::<usize>().ok())
-                            .flatten()
-                            .ok_or(InternalError::FormatError)?,
-                    )
-                }
-                "Connection" => {
-                    connection = ConnectionType::from_str(
-                        iter.next().ok_or(InternalError::FormatError)?.as_str(),
-                    )?
-                }
-                _ => {}
-            }
-            line.clear()
         }
-
-        Ok(RequestHeader {
-            method: method,
-            uri: uri,
-            host: host,
-            user_agent: user_agent,
-            content_length: conetnt_length,
-            connection: connection,
-        })
+        RequestHeader::parse(&buf)
     }
     async fn response_header(&mut self, resp: ResponseHeader) -> Result<()> {
         self.conn_wr
