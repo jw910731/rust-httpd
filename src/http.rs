@@ -76,7 +76,7 @@ pub struct HttpHandleOption {
 // HTTP context shared in all http handler.
 // Contains essential stateless readonly data for request handler
 pub struct HttpContext {
-    cache_status_page: HashMap<Status, Arc<[u8]>>,
+    cache_status_page: HashMap<Status, Box<[u8]>>,
     serve_dir: Box<Path>,
 }
 
@@ -86,7 +86,7 @@ static STATUS_PAGE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/status_pages");
 impl HttpContext {
     // New a `HttpContext` from `HttpHandleOption`
     pub fn new(options: HttpHandleOption) -> Self {
-        let mut cache = HashMap::<Status, Arc<[u8]>>::new();
+        let mut cache = HashMap::<Status, Box<[u8]>>::new();
 
         // Prepare HTTP error response page conetnt
         // FIXME: Do not ignore `option.status_page`
@@ -95,10 +95,10 @@ impl HttpContext {
                 STATUS_PAGE_DIR.get_file(format!("{}.html", status as u32))
             {
                 // If default status page exist
-                Arc::from(f.contents())
+                Box::from(f.contents())
             } else {
                 // Use simple response if no default status page is prepared
-                Arc::from(format!("<h1>{} {}<h1>", status as u32, status.to_string()).as_bytes())
+                Box::from(format!("<h1>{} {}<h1>", status as u32, status.to_string()).as_bytes())
             };
             cache.insert(status, content);
         }
