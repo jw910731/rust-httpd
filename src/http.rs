@@ -109,7 +109,7 @@ impl HttpContext {
     }
 
     // New a `HttpHandler` using the current context
-    pub fn get<R: AsyncRead, W: AsyncWrite>(self: Arc<Self>, rd: R, wr: W) -> HttpHandler<R, W> {
+    pub fn get<R: AsyncRead, W: AsyncWrite>(self: &Self, rd: R, wr: W) -> HttpHandler<R, W> {
         HttpHandler {
             context: self,
             conn_rd: Box::pin(BufReader::new(rd)),
@@ -205,8 +205,8 @@ struct ResponseHeader {
 // This type contains stateful data for each HTTP TCP connection
 // If encountering `Connection: keep-alive`, this object should be reused to get data of subsequent request from stateful buffer
 // Note: Drop the BufReader will lose all buffered internal data and result in data loss, which is bad when `Connection: keep-alive`
-pub struct HttpHandler<R: AsyncRead, W: AsyncWrite> {
-    context: Arc<HttpContext>,
+pub struct HttpHandler<'a, R: AsyncRead, W: AsyncWrite> {
+    context: &'a HttpContext,
     conn_rd: Pin<Box<BufReader<R>>>,
     conn_wr: Pin<Box<BufWriter<W>>>,
 }
@@ -228,7 +228,7 @@ fn eof_err_helper<T>(e: std::io::Error) -> Result<T> {
     }
 }
 
-impl<R: AsyncRead, W: AsyncWrite> HttpHandler<R, W> {
+impl<'a, R: AsyncRead, W: AsyncWrite> HttpHandler<'a, R, W> {
     // Handle function, the main entry point for the `HttpHandler` type
     pub async fn handle(&mut self) -> Result<HttpHandleStatus> {
         // Internally primarily dealing with error conversion into `HttpHandleStatus::EOF`

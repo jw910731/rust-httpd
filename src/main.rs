@@ -1,25 +1,31 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::OnceLock};
 
-use anyhow::Result;
+use anyhow::{Error, Result};
+use http::HttpContext;
 use tokio::{self, io::AsyncWriteExt, net::TcpListener};
 use tokio_task_pool::Pool;
 
 mod http;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let pool = Pool::bounded(8);
     let listener = TcpListener::bind("localhost:8080").await?;
     println!("Bind on localhost:8080");
-    let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
-        status_page: HashMap::<http::Status, Box<Path>>::default(),
-        serve_directory: Box::from(Path::new("./static/")),
-    }));
+
+    static HTTP_CONTEXT: OnceLock<HttpContext> = OnceLock::new();
+    HTTP_CONTEXT
+        .set(HttpContext::new(http::HttpHandleOption {
+            status_page: HashMap::<http::Status, Box<Path>>::default(),
+            serve_directory: Box::from(Path::new("./static/")),
+        }))
+        .map_err(|_| Error::msg("http context bind error"))?;
 
     while let Ok((mut socket, _)) = listener.accept().await {
         // For each TCP connection
 
         // Get a ref of HTTP Context
-        let ctx = http_context.clone();
+        let ctx = HTTP_CONTEXT.get().unwrap();
 
         // Spawn a task dedicated to the connection
         pool.spawn(async move {
