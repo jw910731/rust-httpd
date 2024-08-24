@@ -18,12 +18,11 @@
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
       musl-overlay = final: prev: {
         musl = prev.musl.overrideAttrs (old: {
-          patches = (old.patches or []) ++ [
-            (builtins.fetchurl {
+          patches = (old.patches or []) ++ (prev.lib.optional (prev.stdenv.buildPlatform.isDarwin) (builtins.fetchurl {
               url = "https://github.com/timbertson/musl/compare/f314e133929b6379eccc632bef32eaebb66a7335...05b89f783fd1873ce9ec1127fa76d002921caa23.patch";
               sha256 = "1n17lawfpd551707nh3pr6ilyh0qh7rh0vdb522ijdygggh49rhd";
             })
-          ];
+          );
         });
       };
     in
@@ -32,17 +31,22 @@
       let
         pkgs = import nixpkgs { inherit system; overlays = [ musl-overlay ]; };
         lib = pkgs.lib;
-        target = (lib.systems.parse.mkSystemFromString system).cpu.name + "-unknown-linux-musl";
-        linuxCrossPkgs = if target == "x86_64-unknown-linux-musl"
-                              then pkgs.pkgsCross.musl64.pkgsStatic else
-                               if target == "aarch64-unknown-linux-musl" then pkgs.pkgsCross.aarch64-multiplatform-musl.pkgsStatic
-                               else throw "Unsupported host platform";
-        toolchain = with fenix.packages.${system}; combine [
-          stable.cargo
-          stable.rustc
-          targets.${target}.stable.rust-std
-        ];
-        rust-httpd = (linuxCrossPkgs.makeRustPlatform {
+        linuxPkgs = {
+          "x86_64" = pkgs.pkgsCross.musl64.pkgsStatic;
+          "aarch64" = pkgs.pkgsCross.aarch64-multiplatform-musl.pkgsStatic;
+        };
+        archName = {
+          "x86_64" = "amd64";
+          "aarch64" = "arm64";
+        };
+        rust-httpd-gen = linuxPkgs: let 
+          target = (lib.systems.parse.tripleFromSystem linuxPkgs.stdenv.hostPlatform.parsed);
+          toolchain = with fenix.packages.${system}; combine [
+            stable.cargo
+            stable.rustc
+            targets.${target}.stable.rust-std
+          ];
+        in (linuxPkgs.makeRustPlatform {
           cargo = toolchain;
           rustc = toolchain;
         }).buildRustPackage {
@@ -61,17 +65,15 @@
           cargoLock.lockFile = ./Cargo.lock;
           logLevel = "info";
         };
-      in {
-        devenv-up = self.devShells.${system}.default.config.procfileScript;
-        docker = pkgs.dockerTools.buildLayeredImage {
+        docker = linuxPkgs: pkgs.dockerTools.buildLayeredImage {
           name = "registry.h.jw910731.dev/nix/rust-httpd";
-          tag = "0.1.0";
+          tag = "0.1.0-" + archName.${linuxPkgs.stdenv.hostPlatform.parsed.cpu.name};
           contents = [
-            rust-httpd
-            linuxCrossPkgs.busybox
+            (rust-httpd-gen linuxPkgs)
+            linuxPkgs.busybox
           ];
           config = {
-            Entrypoint = [ "${rust-httpd}/bin/rust-httpd" "0.0.0.0:80" ];
+            Entrypoint = [ "${(rust-httpd-gen linuxPkgs)}/bin/rust-httpd" "0.0.0.0:80" ];
             Env = [
               "RUST_LOG=info"
             ];
@@ -80,7 +82,11 @@
           created = "now";
           maxLayers = 127;
         };
-      });
+      in {
+        devenv-up = self.devShells.${system}.default.config.procfileScript;
+        docker = (docker linuxPkgs.${pkgs.stdenv.hostPlatform.parsed.cpu.name});
+      } // (lib.mapAttrs' (name: value: lib.nameValuePair ("docker-" + archName.${name}) (docker linuxPkgs."${name}")) linuxPkgs)
+      );
 
       devShells = forEachSystem
         (system:
