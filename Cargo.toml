@@ -6,10 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = { version = "1.0.81", features = ["backtrace"] }
-thiserror = "1.0.58"
-tokio = { version = "1.37.0", features = ["full"] }
-strum = "0.26"
-strum_macros = "0.26"
-include_dir = "0.7.3"
+anyhow = { version = "1.0.86" }
+thiserror = "1.0.63"
+tokio = { version = "1.39.3", features = ["full"] }
+strum = "0.26.3"
+strum_macros = "0.26.4"
+include_dir = "0.7.4"
 tokio-task-pool = "0.1.5"
+log = { version = "0.4.22", features = ["std"] }
+env_logger = "0.11.5"
+
+[dev-dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }

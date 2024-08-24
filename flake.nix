@@ -34,8 +34,8 @@
         lib = pkgs.lib;
         target = (lib.systems.parse.mkSystemFromString system).cpu.name + "-unknown-linux-musl";
         linuxCrossPkgs = if target == "x86_64-unknown-linux-musl"
-                              then pkgs.pkgsCross.musl64 else
-                               if target == "aarch64-unknown-linux-musl" then pkgs.pkgsCross.aarch64-multiplatform-musl 
+                              then pkgs.pkgsCross.musl64.pkgsStatic else
+                               if target == "aarch64-unknown-linux-musl" then pkgs.pkgsCross.aarch64-multiplatform-musl.pkgsStatic
                                else throw "Unsupported host platform";
         toolchain = with fenix.packages.${system}; combine [
           stable.cargo
@@ -49,25 +49,36 @@
           pname = "rust-httpd";
           version = "0.1.0";
 
-          src = ./.;
-
+          src = with lib.fileset; toSource {
+            root = ./.;
+            fileset = unions [
+              ./src
+              ./status_pages
+              ./Cargo.lock
+              ./Cargo.toml
+            ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
+          logLevel = "info";
         };
       in {
         devenv-up = self.devShells.${system}.default.config.procfileScript;
-        docker = pkgs.dockerTools.buildImage {
-          name = "rust-httpd";
+        docker = pkgs.dockerTools.buildLayeredImage {
+          name = "registry.h.jw910731.dev/nix/rust-httpd";
           tag = "0.1.0";
-          copyToRoot = pkgs.buildEnv {
-            name = "image-root";
-            pathsToLink = [ "/bin" ];
-            paths = [rust-httpd];
-          };
+          contents = [
+            rust-httpd
+            linuxCrossPkgs.busybox
+          ];
           config = {
-            Cmd = [ "${rust-httpd}/bin/rust-httpd" ];
-            Env = [];
+            Entrypoint = [ "${rust-httpd}/bin/rust-httpd" "0.0.0.0:80" ];
+            Env = [
+              "RUST_LOG=info"
+            ];
+            WorkingDir = "/";
           };
           created = "now";
+          maxLayers = 127;
         };
       });
 

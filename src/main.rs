@@ -1,15 +1,19 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, env::args, path::Path, sync::Arc};
 
 use anyhow::Result;
-use tokio::{self, io::AsyncWriteExt, net::TcpListener};
+use log::{error, info};
+use tokio::{self, net::TcpListener};
 use tokio_task_pool::Pool;
 
 mod http;
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let pool = Pool::bounded(8);
-    let listener = TcpListener::bind("localhost:8080").await?;
-    println!("Bind on localhost:8080");
+    let bind_addr = args().nth(1).unwrap_or("0.0.0.0:8080".to_string());
+    let listener = TcpListener::bind(&bind_addr).await?;
+    info!("Bind on {}", bind_addr);
     let http_context = Arc::new(http::HttpContext::new(http::HttpHandleOption {
         status_page: HashMap::<http::Status, Box<Path>>::default(),
         serve_directory: Box::from(Path::new("./static/")),
@@ -36,18 +40,11 @@ async fn main() -> Result<()> {
                 match handler.handle().await {
                     // Error occurred
                     Err(e) => {
-                        let _ = tokio::io::stderr()
-                            .write(
-                                format!(
-                                    "serving request encounter error: {}\n{}\n",
-                                    e,
-                                    e.backtrace()
-                                )
-                                .as_bytes(),
-                            )
-                            .await
-                            // If async write to stderr fails, fallback to synchronous write
-                            .map_err(|e2| eprintln!("Log error failed {}", e2));
+                        error!(
+                            "serving request encounter error: {}\n{}\n",
+                            e,
+                            e.backtrace()
+                        );
                     }
                     Ok(status) => {
                         // Disconnect if needed
